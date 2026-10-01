@@ -1,18 +1,68 @@
 {
   "camera": {
+    "source": "scrcpy",
     "camera_id": 1,
     "width": 1280,
     "height": 720,
-    "fps": 30
+    "fps": 30,
+    "scrcpy": {
+      "window_title": "LEDPhoneCam",
+      "window_width": 720,
+      "window_height": 480,
+      "camera_facing": "back",
+      "camera_max_size": 720,
+      "auto_launch": true,
+      "launch_timeout_sec": 15
+    }
   },
   "rois": [
     {
       "id": "1",
       "bbox": [
-        682,
-        228,
-        463,
-        392
+        340,
+        114,
+        3,
+        3
+      ],
+      "description": ""
+    },
+    {
+      "id": "2",
+      "bbox": [
+        361,
+        114,
+        4,
+        4
+      ],
+      "description": ""
+    },
+    {
+      "id": "3",
+      "bbox": [
+        400,
+        123,
+        5,
+        3
+      ],
+      "description": ""
+    },
+    {
+      "id": "4",
+      "bbox": [
+        362,
+        131,
+        2,
+        4
+      ],
+      "description": ""
+    },
+    {
+      "id": "5",
+      "bbox": [
+        382,
+        113,
+        2,
+        5
       ],
       "description": ""
     }

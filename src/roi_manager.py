@@ -11,11 +11,22 @@ import cv2
 import numpy as np
 
 
+# Стандартный блок камеры, если в конфиге его нет или он неполный
 _DEFAULT_CAMERA: Dict[str, Any] = {
+    "source": "webcam",
     "camera_id": 1,
     "width": 1280,
     "height": 720,
     "fps": 30,
+    "scrcpy": {
+        "window_title": "LEDPhoneCam",
+        "window_width": 720,
+        "window_height": 480,
+        "camera_facing": "back",
+        "camera_max_size": 720,
+        "auto_launch": True,
+        "launch_timeout_sec": 15,
+    },
 }
 
 
@@ -67,7 +78,12 @@ class ROIManager:
             self.rois = []
             return
 
-        self.camera_config = data.get("camera", dict(_DEFAULT_CAMERA))
+        raw_camera = data.get("camera", {})
+        self.camera_config = {**_DEFAULT_CAMERA, **raw_camera}
+        self.camera_config["scrcpy"] = {
+            **_DEFAULT_CAMERA["scrcpy"],
+            **(raw_camera.get("scrcpy") or {}),
+        }
 
         raw_rois: List[Dict[str, Any]] = data.get("rois", [])
         self.rois = []

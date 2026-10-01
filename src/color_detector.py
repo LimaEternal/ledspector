@@ -13,6 +13,15 @@ import numpy as np
 
 OFF_THRESHOLD: float = 40.0
 
+# Пороги для нейтральных цветов (dark/desaturated → BLACK, bright → WHITE)
+# BLACK_V_THRESHOLD должен быть выше OFF_THRESHOLD, иначе BLACK недостижим.
+BLACK_V_THRESHOLD: float = 70.0
+BLACK_S_THRESHOLD: float = 50.0
+WHITE_V_THRESHOLD: float = 180.0
+WHITE_S_THRESHOLD: float = 40.0
+
+# Диапазоны Hue для цветных светодиодов.
+# Для добавления нового цвета — допишите запись в этот словарь.
 HUE_RANGES: Dict[str, list[Tuple[int, int]]] = {
     "RED": [(0, 10), (160, 180)],
     "AMBER": [(11, 34)],
@@ -42,7 +51,17 @@ class ColorDetector:
     """Детектор состояния и цвета светодиода по BGR-кропу.
 
     Анализирует один кадр: вычисляет среднюю яркость (V-канал HSV)
-    и определяет цвет по среднему Hue.
+    и определяет цвет по средним значениям Hue/Saturation.
+
+    Логика классификации:
+        1. Очень низкая яркость (V < ``OFF_THRESHOLD``) → ``OFF``.
+        2. Тёмный, ненасыщенный кадр → ``BLACK`` (диод есть, но не горит).
+        3. Яркий, ненасыщенный кадр → ``WHITE``.
+        4. Цвет по оттенку ``HUE_RANGES`` → ``RED``/``AMBER``/``GREEN``/``BLUE``.
+        5. Ничего не совпало → ``UNKNOWN``.
+
+    Для добавления новых цветов достаточно расширить ``HUE_RANGES``
+    или добавить дополнительную проверку на базе S/V в ``detect()``.
 
     Example::
 
@@ -73,7 +92,8 @@ class ColorDetector:
 
                 {
                     "is_on": bool,
-                    "color": str,       # "RED"|"GREEN"|"AMBER"|"BLUE"|"OFF"|"UNKNOWN"
+                    "color": str,  # "RED"|"GREEN"|"AMBER"|"BLUE"|"WHITE"|
+                                   # "BLACK"|"OFF"|"UNKNOWN"
                     "brightness": float  # 0.0–255.0
                 }
         """
@@ -83,10 +103,20 @@ class ColorDetector:
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
         mean_h: float = float(np.mean(hsv[:, :, 0]))
+        mean_s: float = float(np.mean(hsv[:, :, 1]))
         mean_v: float = float(np.mean(hsv[:, :, 2]))
 
+        # --- Выключенный диод ---
         if mean_v < self.off_threshold:
             return {"is_on": False, "color": "OFF", "brightness": mean_v}
+
+        # --- Тёмный ненасыщенный кадр: диод есть, но не светится ---
+        if mean_v < BLACK_V_THRESHOLD and mean_s < BLACK_S_THRESHOLD:
+            return {"is_on": False, "color": "BLACK", "brightness": mean_v}
+
+        # --- Яркий ненасыщенный кадр: белый свет ---
+        if mean_v > WHITE_V_THRESHOLD and mean_s < WHITE_S_THRESHOLD:
+            return {"is_on": True, "color": "WHITE", "brightness": mean_v}
 
         color = _classify_hue(mean_h)
         return {"is_on": True, "color": color, "brightness": mean_v}

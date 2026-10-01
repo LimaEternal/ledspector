@@ -8,11 +8,10 @@
 
 import cv2
 
-from src.camera import USBCamera
+from src.camera_factory import create_camera, current_source
 from src.roi_manager import ROIManager
 
 CONFIG_PATH = "config/settings.json"
-CAMERA_ID = 1
 WINDOW_NAME = "LED Inspector — ROI"
 
 
@@ -24,8 +23,9 @@ def run_selection(manager: ROIManager, frame: cv2.typing.MatLike) -> None:
 
 
 def main() -> None:
-    cam = USBCamera(camera_id=CAMERA_ID, width=1280, height=720, fps=30)
     manager = ROIManager(config_path=CONFIG_PATH)
+    # Камера выбирается из настроек (webcam/scrcpy)
+    cam = create_camera(manager.camera_config, current_source(manager.camera_config))
 
     try:
         cam.start()

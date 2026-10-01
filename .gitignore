@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+junk/
+
+# Артефакты headless-режима (Linux)
+snapshot_*.png
+ledspector_changes.log
+*.log
+
+# Вендоренные бинарники (25 МБ, только для Windows-разработки)
+scrcpy-win64-v4.1/

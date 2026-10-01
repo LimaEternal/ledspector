@@ -1,0 +1,143 @@
+{
+  "version": 2,
+  "panel": {
+    "name": "Server 1U — Demo",
+    "width": 1280,
+    "height": 480,
+    "bg_color": "#222222"
+  },
+  "leds": [
+    {
+      "id": "PWR",
+      "x": 130,
+      "y": 180,
+      "size": 64,
+      "on_color": "#00FF00",
+      "off_color": "#003300",
+      "pattern": "SOLID",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "HDD",
+      "x": 285,
+      "y": 328,
+      "size": 64,
+      "on_color": "#FFFFFF",
+      "off_color": "#4A4A4A",
+      "pattern": "BLINK_1HZ",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "NET",
+      "x": 285,
+      "y": 180,
+      "size": 64,
+      "on_color": "#0066FF",
+      "off_color": "#001A33",
+      "pattern": "BLINK_4HZ",
+      "custom_period": 0.25,
+      "phase": 0.0
+    },
+    {
+      "id": "FAULT",
+      "x": 440,
+      "y": 176,
+      "size": 64,
+      "on_color": "#FFAA00",
+      "off_color": "#4A3200",
+      "pattern": "OFF",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "LED_1",
+      "x": 130,
+      "y": 324,
+      "size": 64,
+      "on_color": "#00FF00",
+      "off_color": "#004A00",
+      "pattern": "SOLID",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "LED_2",
+      "x": 435,
+      "y": 324,
+      "size": 64,
+      "on_color": "#0066FF",
+      "off_color": "#001A4A",
+      "pattern": "SOLID",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "LED_3",
+      "x": 590,
+      "y": 252,
+      "size": 64,
+      "on_color": "#FF0000",
+      "off_color": "#4A0000",
+      "pattern": "SOLID",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "LED_4",
+      "x": 378,
+      "y": 68,
+      "size": 64,
+      "on_color": "#FFFFFF",
+      "off_color": "#4A4A4A",
+      "pattern": "SOLID",
+      "custom_period": 1.0,
+      "phase": 0.0
+    },
+    {
+      "id": "CUSTOM_2HZ",
+      "x": 780,
+      "y": 180,
+      "size": 64,
+      "on_color": "#FF6600",
+      "off_color": "#4A1F00",
+      "pattern": "BLINK_CUSTOM",
+      "custom_period": 0.5,
+      "phase": 0.0
+    },
+    {
+      "id": "CUSTOM_8HZ",
+      "x": 940,
+      "y": 180,
+      "size": 64,
+      "on_color": "#00FF00",
+      "off_color": "#004A00",
+      "pattern": "BLINK_CUSTOM",
+      "custom_period": 0.125,
+      "phase": 0.0
+    },
+    {
+      "id": "CUSTOM_05HZ",
+      "x": 860,
+      "y": 328,
+      "size": 64,
+      "on_color": "#0066FF",
+      "off_color": "#001A4A",
+      "pattern": "BLINK_CUSTOM",
+      "custom_period": 2.0,
+      "phase": 0.0
+    },
+    {
+      "id": "CUSTOM_2HZ_PHASE",
+      "x": 1100,
+      "y": 328,
+      "size": 64,
+      "on_color": "#FFAA00",
+      "off_color": "#4A3200",
+      "pattern": "BLINK_CUSTOM",
+      "custom_period": 0.5,
+      "phase": 0.25
+    }
+  ]
+}

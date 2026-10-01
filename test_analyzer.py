@@ -13,13 +13,12 @@ from typing import Any, Dict, List, Tuple
 
 import cv2
 
-from src.camera import USBCamera
+from src.camera_factory import create_camera, current_source
 from src.color_detector import ColorDetector
 from src.frequency_analyser import FrequencyAnalyser
 from src.roi_manager import ROIManager
 
 CONFIG_PATH = "config/settings.json"
-CAMERA_ID = 1
 WINDOW_NAME = "LED Inspector — Analyzer"
 
 # Палитра для отрисовки статуса
@@ -65,7 +64,7 @@ def _draw_info_panel(
     cv2.putText(frame, text, (10, y_offset),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
 
-    return y_offset + 28
+    return y_offset + 34
 
 
 def run_selection(manager: ROIManager, frame: cv2.typing.MatLike) -> None:
@@ -76,8 +75,9 @@ def run_selection(manager: ROIManager, frame: cv2.typing.MatLike) -> None:
 
 
 def main() -> None:
-    cam = USBCamera(camera_id=CAMERA_ID, width=1280, height=720, fps=30)
     manager = ROIManager(config_path=CONFIG_PATH)
+    # Камера выбирается из настроек (webcam/scrcpy)
+    cam = create_camera(manager.camera_config, current_source(manager.camera_config))
     detector = ColorDetector()
     analyser = FrequencyAnalyser(window_seconds=2.0)
 
@@ -125,7 +125,7 @@ def main() -> None:
             annotated = manager.draw_rois(frame)
 
             # Инфо-панель
-            y = 28
+            y = 34
             for roi_id, state, freq, color in roi_states:
                 y = _draw_info_panel(annotated, roi_id, state, freq, color, y)
 
