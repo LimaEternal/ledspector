@@ -21,7 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.console_monitor import Monitor, crop_led
 from src.grid_overlay import annotate_frame, draw_grid
 from src.led_config import load_config, save_config, LedConfig, LED
-from src.linux_camera import LinuxCamera, list_video_devices
+from src.linux_camera import (
+    DEFAULT_FOURCC,
+    EXPOSURE_CONTROL,
+    LinuxCamera,
+    list_video_devices,
+    parse_formats_ext,
+    resolve_auto_exposure_values,
+)
 
 fails = []
 
@@ -269,6 +276,67 @@ with tempfile.TemporaryDirectory() as d:
     mon7.step()
     check("сигнальный снимок сохранён", Path(out2).is_file())
     check("флаг сброшен после снимка", mon7._snapshot_requested is None)
+
+print("== 13. разбор реального вывода v4l2-ctl (VEGMAN-R220) ==")
+FORMATS_EXT = """ioctl: VIDIOC_ENUM_FMT
+        Type: Video Capture
+
+        [0]: 'MJPG' (Motion-JPEG, compressed)
+                Size: Discrete 480x320
+                        Interval: Discrete 0.040s (25.000 fps)
+                Size: Discrete 640x480
+                        Interval: Discrete 0.040s (25.000 fps)
+                Size: Discrete 1280x720
+                        Interval: Discrete 0.050s (20.000 fps)
+        [1]: 'YUYV' (YUYV 4:2:2)
+                Size: Discrete 320x240
+                        Interval: Discrete 0.040s (25.000 fps)
+                Size: Discrete 640x480
+                        Interval: Discrete 0.100s (10.000 fps)
+"""
+CTRLS = """User Controls
+
+                     brightness 0x00980900 (int)    : min=-127 max=127 step=1 default=0 value=0 flags=has-min-max
+
+Camera Controls
+
+                  auto_exposure 0x009a0901 (menu)   : min=0 max=3 default=3 value=1 (Manual Mode)
+         exposure_time_absolute 0x009a0902 (int)    : min=80 max=100000 step=1 default=80 value=500 flags=has-min-max
+"""
+parsed = parse_formats_ext(FORMATS_EXT)
+check("форматы разобраны", set(parsed) == {"MJPG", "YUYV"}, set(parsed))
+check("MJPG 1280x720@20", (1280, 720, 20.0) in parsed["MJPG"], parsed.get("MJPG"))
+check("MJPG 480x320@25", (480, 320, 25.0) in parsed["MJPG"])
+check("MJPG 640x480@25", (640, 480, 25.0) in parsed["MJPG"])
+check("YUYV 640x480 только @10", (640, 480, 10.0) in parsed["YUYV"], parsed.get("YUYV"))
+check("YUYV не даёт 720p", not any(w == 1280 for w, _, _ in parsed["YUYV"]))
+check(
+    "720p достижим только через MJPG (причина выбора fourcc)",
+    [f for f, s in parsed.items() if any(w == 1280 for w, _, _ in s)] == ["MJPG"],
+)
+check("FPS не завышен в 100 раз", all(fps < 100 for sizes in parsed.values() for _, _, fps in sizes))
+
+auto = resolve_auto_exposure_values(CTRLS)
+check("auto_exposure: manual = 1", auto["manual"] == 1, auto)
+check("auto_exposure: текущее = 1", auto["current"] == 1, auto)
+check("auto_exposure: тип (menu) не спутан с подписью", auto["auto"] is None, auto)
+check("пустой formats не падает", parse_formats_ext("") == {})
+check("None не падает", parse_formats_ext(None) == {})
+check("нет auto_exposure -> None",
+      resolve_auto_exposure_values("brightness 0x1 (int) : value=5")["manual"] is None)
+check("обратная нумерация камеры",
+      resolve_auto_exposure_values(
+          "auto_exposure (menu) : min=0 max=3 default=1 value=3 (Aperture Priority Mode)"
+      )["auto"] == 3)
+check("Manual Mode при value=2",
+      resolve_auto_exposure_values(
+          "auto_exposure (menu) : min=0 max=3 default=3 value=2 (Manual Mode)"
+      )["manual"] == 2)
+check("имя контрола экспозиции = exposure_time_absolute",
+      EXPOSURE_CONTROL == "exposure_time_absolute", EXPOSURE_CONTROL)
+check("fourcc по умолчанию MJPG", cam.fourcc == "MJPG", cam.fourcc)
+check("fourcc по умолчанию хранится в конструкторе",
+      LinuxCamera(width=1280, height=720).fourcc == "MJPG")
 
 print()
 if fails:

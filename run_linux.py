@@ -27,6 +27,7 @@ from src.console_monitor import Monitor, crop_led
 from src.grid_overlay import draw_grid, draw_led_boxes
 from src.led_config import LedConfig, DEFAULT_CONFIG_PATH, load_config
 from src.linux_camera import (
+    DEFAULT_FOURCC,
     LinuxCamera,
     have_v4l2_ctl,
     list_video_devices,
@@ -60,11 +61,26 @@ def cmd_check(_: argparse.Namespace) -> None:
     else:
         print("НЕ НАЙДЕН (пакет v4l-utils)")
 
-    print("\n--- попытка открыть камеру /dev/video0 (1280x720) ---")
+    print("\n--- поддерживаемые форматы ---")
     try:
-        cam = LinuxCamera(width=1280, height=720)
+        fmts = LinuxCamera(width=1280, height=720).list_formats_ext()
+        print(fmts or "неизвестно (v4l2-ctl недоступен?)")
+        cam_probe = LinuxCamera(width=1280, height=720)
+        print(
+            f"1280x720 в MJPG: "
+            f"{'да' if cam_probe.supports(1280, 720, 'MJPG') else 'нет'}; "
+            f"в YUYV: "
+            f"{'да' if cam_probe.supports(1280, 720, 'YUYV') else 'нет'}"
+        )
+    except Exception as exc:
+        print(f"ОШИБКА: {type(exc).__name__}: {exc}")
+
+    print("\n--- попытка открыть камеру /dev/video0 (MJPG 1280x720) ---")
+    try:
+        cam = LinuxCamera(width=1280, height=720, fourcc=DEFAULT_FOURCC)
         cam.start()
         print(cam.describe())
+        print("режимы auto_exposure:", cam.resolve_auto_exposure())
         print("controls:")
         print(cam.list_controls() or "недоступны")
         cam.release()
@@ -81,7 +97,13 @@ def cmd_grid(args: argparse.Namespace) -> None:
     except Exception as exc:
         print(f"Конфиг {args.config} не загружен ({exc}). Рисуем только сетку.")
 
-    cam, _ = open_camera(device=args.device, width=1280, height=720, fps=args.fps)
+    cam, _ = open_camera(
+        device=args.device,
+        width=1280,
+        height=720,
+        fps=args.fps,
+        fourcc=args.fourcc,
+    )
     try:
         cam.set_exposure(args.exposure)
         print("Снимаем один кадр...")
@@ -122,7 +144,13 @@ def cmd_exposure(args: argparse.Namespace) -> None:
         print(f"Внимание: не удалось загрузить конфиг {args.config}: {exc}")
         led_config = None
 
-    cam, _ = open_camera(device=args.device, width=1280, height=720, fps=args.fps)
+    cam, _ = open_camera(
+        device=args.device,
+        width=1280,
+        height=720,
+        fps=args.fps,
+        fourcc=args.fourcc,
+    )
     try:
         current = cam.get_exposure() or 500
         while True:
@@ -188,7 +216,13 @@ def cmd_monitor(args: argparse.Namespace) -> None:
     print("=== LEDSpector Monitor ===")
     led_config = load_config(args.config)
 
-    cam, _ = open_camera(device=args.device, width=1280, height=720, fps=args.fps)
+    cam, _ = open_camera(
+        device=args.device,
+        width=1280,
+        height=720,
+        fps=args.fps,
+        fourcc=args.fourcc,
+    )
     mon: Optional[Monitor] = None
     try:
         led_config.check_resolution(cam.actual_width, cam.actual_height)
@@ -222,6 +256,11 @@ def _add_common_args(parser: argparse.ArgumentParser, log_default: Optional[str]
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--fourcc",
+        default=DEFAULT_FOURCC,
+        help="Формат камеры: mjpg даёт 1280x720@20, yuyv — только 640x480@10",
+    )
     parser.add_argument("--exposure", type=int)
     parser.add_argument("--window", type=float, default=2.0)
     parser.add_argument("--interval", type=float, default=0.1)
@@ -253,6 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     s.add_argument("--device", type=int, default=0)
     s.add_argument("--fps", type=int, default=30)
+    s.add_argument(
+        "--fourcc",
+        default=DEFAULT_FOURCC,
+        help="Формат камеры: mjpg даёт 1280x720@20, yuyv — только 640x480@10",
+    )
     s.add_argument("--exposure", type=int, default=500)
     s.add_argument("--out", default="snapshot.png")
     s.add_argument("--minor-step", type=int, default=10)
@@ -263,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     s.add_argument("--device", type=int, default=0)
     s.add_argument("--fps", type=int, default=30)
+    s.add_argument(
+        "--fourcc",
+        default=DEFAULT_FOURCC,
+        help="Формат камеры: mjpg даёт 1280x720@20, yuyv — только 640x480@10",
+    )
     s.set_defaults(func=cmd_exposure)
 
     s = sub.add_parser("monitor", help="Таблица в реальном времени + лог изменений")
