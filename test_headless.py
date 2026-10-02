@@ -18,14 +18,25 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from src.color_detector import ColorDetector
 from src.console_monitor import Monitor, crop_led
 from src.grid_overlay import annotate_frame, draw_grid
+from src.led_analyzer import (
+    analyze_frame,
+    draw_measurements,
+    find_led_blobs,
+    format_config_lines,
+    is_confusable,
+    measure_led,
+)
 from src.led_config import load_config, save_config, LedConfig, LED
 from src.linux_camera import (
     DEFAULT_FOURCC,
     EXPOSURE_CONTROL,
     LinuxCamera,
+    detect_degraded_controls,
     list_video_devices,
+    parse_controls,
     parse_formats_ext,
     resolve_auto_exposure_values,
 )
@@ -45,13 +56,18 @@ print("== 1. парсер конфига ==")
 cfg = load_config("config/leds.tsv")
 check("панель из шапки", cfg.panel == "VEGMAN-R220-front", cfg.panel)
 check("разрешение 1280x720", cfg.resolution == (1280, 720), cfg.resolution)
-check("9 диодов", len(cfg.leds) == 9, len(cfg.leds))
-check("первый PWR 482x231", cfg.leds[0].bbox == (482, 231, 5, 5), cfg.leds[0].bbox)
-check("описание сохранено", cfg.leds[0].description == "питание", cfg.leds[0].description)
-check("описание с пробелом", cfg.get("LED_3").description == "демо-диод 3", cfg.get("LED_3").description)
-check("get() по id", cfg.get("NET") is not None)
+check("8 диодов в конфиге", len(cfg.leds) == 8, len(cfg.leds))
+check("первый LED_1 на сдвинутой точке",
+      cfg.leds[0].bbox == (566, 389, 5, 5), cfg.leds[0].bbox)
+check("описание сохранено", cfg.leds[0].description == "синий (центр 568,447)",
+      cfg.leds[0].description)
+check("описание с пробелом", cfg.get("LED_3").description == "красный (центр 897,559)",
+      cfg.get("LED_3").description)
+check("get() по id", cfg.get("LED_5") is not None)
 check("get() отсутствующего -> None", cfg.get("NOPE") is None)
-check("центр PWR", cfg.leds[0].center == (484, 233), cfg.leds[0].center)
+check("центр первого диода", cfg.leds[0].center == (568, 391), cfg.leds[0].center)
+check("все точки в границах кадра",
+      all(0 <= led.x < 1280 and 0 <= led.y < 720 for led in cfg.leds))
 
 print("== 2. устойчивость к мусору ==")
 bad = """panel: test
@@ -86,6 +102,30 @@ with tempfile.TemporaryDirectory() as d:
     check("все диоды сохранены", [(x.id, x.bbox) for x in c3.leds] == [(x.id, x.bbox) for x in cfg.leds])
     check("описания сохранены", [x.description for x in c3.leds] == [x.description for x in cfg.leds])
 
+print("== 3b. round-trip с длинными ID ==")
+# LED_10 не помещается в колонку шириной 6: при фиксированной ширине
+# координаты прилипали к ID («LED_10886») и строка переставала читаться.
+long_cfg = LedConfig(
+    panel="t",
+    resolution=(1280, 720),
+    leds=[
+        LED("A", 10, 20, 5, 5, "короткий"),
+        LED("LED_10", 886, 29, 5, 5, "красный (центр 908,11)"),
+        LED("ОЧЕНЬ_ДЛИННЫЙ_ID", 100, 200, 5, 5, "с пробелами и скобками"),
+    ],
+)
+with tempfile.TemporaryDirectory() as d:
+    p = str(Path(d) / "long.tsv")
+    save_config(long_cfg, p)
+    back = load_config(p)
+    check("длинные ID переживают сохранение", len(back.leds) == 3, [x.id for x in back.leds])
+    check("ID не склеиваются с координатами",
+          [x.bbox for x in back.leds] == [(10, 20, 5, 5), (886, 29, 5, 5), (100, 200, 5, 5)],
+          [x.bbox for x in back.leds])
+    check("описания со скобками сохранены",
+          [x.description for x in back.leds][1] == "красный (центр 908,11)",
+          [x.description for x in back.leds])
+
 print("== 4. проверка разрешения ==")
 try:
     cfg.check_resolution(480, 320)
@@ -105,12 +145,14 @@ grid = draw_grid(frame, minor_step=10, major_step=50)
 check("размер кадра не изменился", grid.shape == frame.shape, grid.shape)
 check("исходный кадр не мутирован", np.array_equal(frame[0, 0], np.full(3, 90, np.uint8)))
 check("сетка что-то нарисовала", not np.array_equal(grid, frame))
-check("подписи различают кадр", np.count_nonzero(np.any(grid != frame, axis=2)) > 5000)
+check("подписи различают кадр", np.count_nonzero(np.any(grid != frame, axis=2)) > 1000)
 
-# линии ровно там, где заказано
-col_line = np.all(grid[300, :, :] == np.all(grid[300, :, :]) * np.ones(3, np.uint8) * 0 + grid[300, :, :], axis=-1)
-x_diff = np.count_nonzero(np.any(grid[300, :] != frame[300, :], axis=1))
-check("много вертикальных линий", x_diff > 25, x_diff)
+# Линии сетки идут по кратным 10, а фон между ними остаётся нетронутым.
+# Раньше здесь стояла проверка на большую площадь изменений — она ловила
+# артефакт затемнения фона от наивного addWeighted, который уже исправлен.
+row305 = np.where(np.any(grid[305] != frame[305], axis=1))[0]
+check("вертикальные линии только на кратных 10",
+      set(int(x) for x in row305) == set(range(0, 1280, 10)))
 
 annotated = annotate_frame(frame, cfg.leds, with_grid=True)
 check("annotate с LED работает", annotated.shape == frame.shape)
@@ -297,6 +339,12 @@ FORMATS_EXT = """ioctl: VIDIOC_ENUM_FMT
 CTRLS = """User Controls
 
                      brightness 0x00980900 (int)    : min=-127 max=127 step=1 default=0 value=0 flags=has-min-max
+                      contrast 0x00980901 (int)    : min=0 max=511 step=1 default=256 value=0 flags=has-min-max
+                      saturation 0x00980902 (int)    : min=0 max=511 step=1 default=256 value=0 flags=has-min-max
+                          gamma 0x00980910 (int)    : min=10 max=30 step=10 default=20 value=10 flags=has-min-max
+                           gain 0x00980913 (int)    : min=1 max=7 step=1 default=4 value=4 flags=has-min-max
+           white_balance_temperature 0x0098091a (int)    : min=0 max=6500 step=1 default=4500 value=4500 flags=has-min-max
+                      sharpness 0x0098091b (int)    : min=0 max=256 step=1 default=128 value=0 flags=has-min-max
 
 Camera Controls
 
@@ -337,6 +385,154 @@ check("имя контрола экспозиции = exposure_time_absolute",
 check("fourcc по умолчанию MJPG", cam.fourcc == "MJPG", cam.fourcc)
 check("fourcc по умолчанию хранится в конструкторе",
       LinuxCamera(width=1280, height=720).fourcc == "MJPG")
+
+print("== 14. детектор пересвета ==")
+det = ColorDetector()
+
+
+def flat(bgr):
+    """Однородный кроп заданного цвета."""
+    return np.full((9, 9, 3), bgr, np.uint8)
+
+
+r = det.detect(flat((0, 200, 0)))
+check("чистый зелёный -> GREEN", r["color"] == "GREEN", r["color"])
+check("чистый зелёный не пересвечен", r["blown_out"] is False)
+check("пересвет 0% у чистого", r["clipped_fraction"] == 0.0)
+
+r = det.detect(flat((250, 255, 253)))
+check("срезанные каналы -> BLOWN_OUT", r["color"] == "BLOWN_OUT", r["color"])
+check("blown_out True", r["blown_out"] is True)
+check("clipped_fraction ~100%", r["clipped_fraction"] > 0.99, r["clipped_fraction"])
+check("пересвет НЕ путается с WHITE", r["color"] != "WHITE")
+
+# Частичный пересвет: 2 из 9 строк срезаны -> ниже порога 30%.
+part = np.full((9, 9, 3), (0, 200, 0), np.uint8)
+part[0:2, :, :] = (250, 255, 253)
+r = det.detect(part)
+check("частичный пересвет (22%) не BLOWN", r["blown_out"] is False, r["clipped_fraction"])
+check("частичный пересвет виден в метрике", 0.1 < r["clipped_fraction"] < 0.3, r["clipped_fraction"])
+check("частичный пересвет сохраняет цвет", r["color"] == "GREEN", r["color"])
+
+r = det.detect(flat((255, 255, 255)))
+check("белый -> BLOWN_OUT (каналы срезаны)", r["color"] == "BLOWN_OUT", r["color"])
+r = det.detect(np.zeros((9, 9, 3), np.uint8))
+check("чёрный -> OFF", r["color"] == "OFF" and r["blown_out"] is False)
+r = det.detect(np.array([], np.uint8))
+check("пустой -> OFF, не падает", r["color"] == "OFF" and r["blown_out"] is False)
+check("у результата есть hue/saturation", "hue" in r and "saturation" in r)
+
+print("== 15. разбор контролов камеры ==")
+controls = parse_controls(CTRLS)
+# 7 из блока User Controls + 2 из Camera Controls.
+check("найдены все контролы", len(controls) == 9, len(controls))
+check("saturation прочитан как 0", controls["saturation"]["value"] == 0)
+check("default saturation = 256", controls["saturation"]["default"] == 256)
+check("gain прочитан", controls["gain"]["value"] == 4)
+check("диапазон gain", (controls["gain"]["min"], controls["gain"]["max"]) == (1, 7))
+check("пустой вывод не падает", parse_controls("") == {})
+
+suspect = detect_degraded_controls(controls)
+names = sorted(name for name, _v, _d in suspect)
+check("saturation помечен как сброшенный", "saturation" in names, names)
+check("contrast помечен как сброшенный", "contrast" in names, names)
+check("gain не помечен", "gain" not in names)
+check("здоровые контролы не ругаются",
+      detect_degraded_controls({"saturation": {"value": 256, "default": 256}}) == [])
+
+print("== 16. подбор точки замера вне пересвета ==")
+
+
+def glow(cx, cy, radius, color=(0, 200, 0), core_radius=18):
+    """Синтетический диод: срезанное ядро и затухающий ореол.
+
+    Ядро моделируется как ровно 255 в своём канале — так ведёт себя
+    реальный горевший диод, когда поток всех трёх каналов упирается в
+    предел АЦП. Ореол падает линейно и держит насыщенность.
+    """
+    frame = np.full((720, 1280, 3), 15, np.uint8)
+    yy, xx = np.mgrid[0:720, 0:1280]
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+    # Ореол: от полной яркости у ядра к фону на радиусе radius.
+    halo = np.clip(1.0 - (dist - core_radius) / float(radius - core_radius), 0, 1)
+    for ch in range(3):
+        frame[:, :, ch] = np.clip(
+            15 + 240 * halo * (color[ch] / 255.0), 0, 255
+        ).astype(np.uint8)
+
+    # Ядро: каналы срезаны в 255 — радиусная маска с жёстким краем.
+    core = dist <= core_radius
+    for ch in range(3):
+        if color[ch] > 0:
+            frame[:, :, ch] = np.where(core, 255, frame[:, :, ch])
+        else:
+            frame[:, :, ch] = np.where(core, 15, frame[:, :, ch])
+
+    return frame
+
+
+glow_frame = glow(600, 400, 90)
+blobs = find_led_blobs(glow_frame)
+check("диод найден", len(blobs) >= 1, len(blobs))
+# Ярче всего у центра, поэтому первым идёт именно диод, а не ореол.
+core = blobs[0]
+check("найден именно диод (максимум яркости)", core.peak_v >= 250, core.peak_v)
+check("центр совпал", abs(core.cx - 600) < 6 and abs(core.cy - 400) < 6,
+      (core.cx, core.cy))
+
+m = measure_led(glow_frame, core.cx, core.cy)
+check("центр пересвечен", m.center_clipped > 0.5, m.center_clipped)
+check("вердикт MOVE", m.status == "MOVE", m.status)
+check("точка подобрана", m.suggested is not None, m.detail)
+if m.suggested:
+    x, y, w, h = m.suggested
+    check("точка не в центре", abs((x + w // 2) - 600) + abs((y + h // 2) - 400) > 10)
+    crop = glow_frame[y:y + h, x:x + w]
+    verdict = det.detect(crop)
+    check("в новой точке нет пересвета", verdict["blown_out"] is False, verdict["color"])
+    check("в новой точке есть насыщенность", verdict["saturation"] > 60, verdict["saturation"])
+    check("в новой точке читается GREEN", verdict["color"] == "GREEN", verdict["color"])
+
+check("профиль непустой", len(m.profile) > 3, len(m.profile))
+check("профиль убывает по радиусу",
+      all(m.profile[i][1] >= m.profile[i + 1][1] for i in range(len(m.profile) - 1))
+      or len(m.profile) < 2)
+
+# Яркое срезанное ядро диаметром в несколько пикселей: ореола за ним
+# нет, уходить некуда -> NO_HALO. Это и есть настоящий признак того, что
+# одной подстройкой не обойтись.
+pin_frame = np.full((720, 1280, 3), 10, np.uint8)
+cv2.circle(pin_frame, (600, 400), 3, (0, 60, 0), -1)
+cv2.circle(pin_frame, (600, 400), 2, (255, 255, 255), -1)
+m2 = measure_led(pin_frame, 600, 400)
+check("срезанное ядро без ореола -> NO_HALO", m2.status == "NO_HALO", m2.status)
+check("NO_HALO объясняет причину", "gain" in m2.detail or "оптик" in m2.detail, m2.detail)
+check("NO_HALO не предлагает точку", m2.suggested is None)
+check("NO_HALO попадает в needs_move=False", m2.needs_move is False)
+
+# Тусклое, но не срезанное пятно: точку найти можно, статус OK.
+dim_frame = np.full((720, 1280, 3), 10, np.uint8)
+cv2.circle(dim_frame, (600, 400), 5, (0, 60, 0), -1)
+m_dim = measure_led(dim_frame, 600, 400)
+check("тусклое без пересвета -> OK", m_dim.status == "OK", m_dim.status)
+
+check("пустой кадр не падает", find_led_blobs(np.array([], np.uint8)) == [])
+check("тёмный кадр без диодов", find_led_blobs(np.zeros((720, 1280, 3), np.uint8)) == [])
+
+print("== 17. формат вывода analyze ==")
+check("строки конфига генерируются", len(format_config_lines([m])) == 1, format_config_lines([m]))
+lines = format_config_lines([m, m2])
+check("NO_HALO пропускается", len(lines) == 1, lines)
+annotated = draw_measurements(glow_frame, [m, m2])
+check("разметка строится", annotated.shape == glow_frame.shape)
+check("разметка не мутирует кадр", not np.array_equal(annotated, glow_frame))
+
+print("== 18. сверка оттенков ==")
+check("одинаковые оттенки считаются одним цветом", is_confusable(60.0, [62.0]))
+check("разные оттенки не путаются", not is_confusable(60.0, [120.0]))
+check("сравнение по кругу: 179 и 1 это красный", is_confusable(179.0, [1.0]))
+check("пустой список эталонов не отвергает", not is_confusable(60.0, []))
 
 print()
 if fails:

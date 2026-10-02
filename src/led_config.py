@@ -252,9 +252,15 @@ def save_config(config: LedConfig, path: Optional[str] = None) -> Path:
         "",
         "# ID   X    Y    W    H   описание",
     ]
+    # Ширина колонки ID берётся по факту: у ID вроде LED_10 шесть знаков,
+    # и при фиксированной ширине следующее поле прилипает к нему вплотную
+    # («LED_10886»), после чего строка не читается обратно.
+    id_width = max(6, *(len(led.id) for led in config.leds)) + 1 if config.leds else 7
+
     for led in config.leds:
+        coords = f"{led.x:<5}{led.y:<5}{led.w:<5}{led.h:<5}"
         tail = f"   {led.description}" if led.description else ""
-        lines.append(f"{led.id:<6}{led.x:<5}{led.y:<5}{led.w:<5}{led.h:<5}{tail}")
+        lines.append(f"{led.id:<{id_width}}{coords}{tail}")
 
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_suffix(target.suffix + ".tmp")

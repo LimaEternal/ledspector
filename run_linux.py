@@ -14,7 +14,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Optional
+from pathlib import Path
+from typing import Dict, Optional, Sequence
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -25,9 +26,16 @@ import cv2
 from src.color_detector import ColorDetector
 from src.console_monitor import Monitor, crop_led
 from src.grid_overlay import draw_grid, draw_led_boxes
+from src.led_analyzer import (
+    analyze_frame,
+    draw_measurements,
+    format_config_lines,
+    prefix_id,
+)
 from src.led_config import LedConfig, DEFAULT_CONFIG_PATH, load_config
 from src.linux_camera import (
     DEFAULT_FOURCC,
+    EXPOSURE_CONTROL,
     LinuxCamera,
     have_v4l2_ctl,
     list_video_devices,
@@ -212,6 +220,147 @@ def _install_snapshot_signal(
         pass
 
 
+def _parse_set_ctrl(values: Optional[Sequence[str]]) -> Dict[str, int]:
+    """Разбирает --set-ctrl в словарь {контрол: значение}.
+
+    Принимается и перечисление через запятую (`gain=1,saturation=256`),
+    и повторение флага — формат v4l2-ctl тот же, чтобы не путаться.
+    """
+    settings: Dict[str, int] = {}
+    for chunk in values or ():
+        for pair in chunk.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                print(f"[run_linux] Пропущено '{pair}': ожидается имя=значение")
+                continue
+            name, _, raw = pair.partition("=")
+            name = name.strip().lower()
+            try:
+                settings[name] = int(raw.strip())
+            except ValueError:
+                # Меню-контролы принимают и подписи, а не только числа.
+                settings[name] = raw.strip()  # type: ignore[assignment]
+    return settings
+
+
+def _apply_startup_controls(cam: LinuxCamera, args: argparse.Namespace) -> None:
+    """Применяет --exposure и --set-ctrl, затем проверяет состояние камеры."""
+    settings = _parse_set_ctrl(getattr(args, "set_ctrl", None))
+
+    exposure = getattr(args, "exposure", None)
+    if exposure is not None:
+        if settings:
+            settings.setdefault(EXPOSURE_CONTROL, int(exposure))
+        else:
+            cam.set_exposure(int(exposure))
+
+    if settings:
+        cam.apply_controls(settings)
+
+    cam.warn_degraded_controls()
+
+
+def cmd_analyze(args: argparse.Namespace) -> None:
+    """Разбирает готовый снимок: находит диоды и подбирает точки замера."""
+    print("=== LEDSpector Analyze ===")
+
+    if args.image:
+        frame = cv2.imread(args.image)
+        if frame is None:
+            raise SystemExit(f"Не удалось открыть изображение: {args.image}")
+        print(f"Кадр: {args.image} ({frame.shape[1]}x{frame.shape[0]})")
+    else:
+        cam, _ = open_camera(
+            device=args.device,
+            width=1280,
+            height=720,
+            fps=args.fps,
+            fourcc=args.fourcc,
+        )
+        try:
+            _apply_startup_controls(cam, args)
+            ok, frame = cam.read_frame()
+            if not ok or frame is None:
+                raise SystemExit("Не удалось получить кадр с камеры")
+        finally:
+            cam.release()
+
+    detector = ColorDetector()
+    measurements = analyze_frame(
+        frame,
+        detector=detector,
+        window=args.window_size,
+    )
+
+    if not measurements:
+        print("Светящихся пятен не найдено. Проверь экспозицию и gain.")
+        return
+
+    print()
+    print(
+        f"{'ID':<8}{'центр':<12}{'вердикт':<10}{'центр V/S':<12}"
+        f"{'пересвет':<10}новая точка"
+    )
+    print("-" * 74)
+
+    movable = 0
+    for number, m in enumerate(measurements, start=1):
+        if m.suggested is None:
+            spot = "нет годной точки"
+        else:
+            x, y, w, h = m.suggested
+            spot = f"({x},{y}) {w}x{h} r={m.suggested_radius}"
+            if m.status == "MOVE":
+                movable += 1
+
+        print(
+            f"{prefix_id(number):<8}({m.cx},{m.cy})".ljust(20)
+            + f"{m.status:<10}"
+            + f"{m.center_v:.0f}/{m.center_s:.0f}".ljust(12)
+            + f"{100 * m.center_clipped:.0f}%".ljust(10)
+            + spot
+        )
+
+    print()
+    if movable:
+        print(f"Диодов с пересветом в центре: {movable} из {len(measurements)}.")
+        print(
+            "Пересвет в центре означает, что цвет там недоступен физически, "
+            "и понижение экспозиции не помогает: приёмник суммирует поток "
+            "от соседних диодов. Помогает замер на краю ореола — точки "
+            "подобраны ниже."
+        )
+    else:
+        print("Пересвета в центре нет: центры диодов можно замерять напрямую.")
+
+    if args.out:
+        annotated = draw_measurements(frame, measurements)
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(args.out, annotated)
+        print(f"\nРазметка сохранена: {args.out}")
+
+    lines = format_config_lines(measurements, window_size=args.window_size)
+    if lines:
+        print("\nГотовый блок для config/leds.tsv:")
+        for line in lines:
+            print(f"  {line}")
+        print(
+            "\nЗамени содержимое блока ID..(последняя строка) в конфиге этими "
+            "строками. Диоды со статусом «нет годной точки» в блок не попадают."
+        )
+
+
+def cmd_find(args: argparse.Namespace) -> None:
+    """Короткий вариант analyze: только координаты новых точек замера."""
+    # Разметка не сохраняется — команда существует ради блока координат,
+    # поэтому лишний артефакт на диске просто не нужен.
+    if not args.out:
+        args.out = ""
+    cmd_analyze(args)
+
+
 def cmd_monitor(args: argparse.Namespace) -> None:
     print("=== LEDSpector Monitor ===")
     led_config = load_config(args.config)
@@ -226,8 +375,7 @@ def cmd_monitor(args: argparse.Namespace) -> None:
     mon: Optional[Monitor] = None
     try:
         led_config.check_resolution(cam.actual_width, cam.actual_height)
-        if args.exposure is not None:
-            cam.set_exposure(args.exposure)
+        _apply_startup_controls(cam, args)
         mon = Monitor(led_config, cam, window_seconds=args.window, use_color=not args.brightness_only)
         if args.log:
             mon.open_log(args.log)
@@ -271,6 +419,15 @@ def _add_common_args(parser: argparse.ArgumentParser, log_default: Optional[str]
         "--brightness-only", action="store_true", help="Только яркость (без HSV-цвета)"
     )
     parser.add_argument(
+        "--set-ctrl",
+        action="append",
+        metavar="NAME=VALUE",
+        help=(
+            "Контрол камеры через v4l2-ctl, можно перечислить через запятую. "
+            "Повторяемый флаг. Например: --set-ctrl gain=1,saturation=256"
+        ),
+    )
+    parser.add_argument(
         "--annotated",
         help="Сохранять кадр с разметкой по Ctrl+\\ в этот файл",
     )
@@ -278,6 +435,24 @@ def _add_common_args(parser: argparse.ArgumentParser, log_default: Optional[str]
         "--annotated-no-grid",
         action="store_true",
         help="Сохранять аннотированный кадр без координатной сетки",
+    )
+
+
+def _add_camera_args(parser: argparse.ArgumentParser) -> None:
+    """Опции камеры для команд, работающих и со снимком, и с устройством."""
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument(
+        "--fourcc",
+        default=DEFAULT_FOURCC,
+        help="Формат камеры: mjpg даёт 1280x720@20, yuyv — только 640x480@10",
+    )
+    parser.add_argument("--exposure", type=int)
+    parser.add_argument(
+        "--set-ctrl",
+        action="append",
+        metavar="NAME=VALUE",
+        help="Контролы камеры, например --set-ctrl gain=1,saturation=256",
     )
 
 
@@ -312,7 +487,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_FOURCC,
         help="Формат камеры: mjpg даёт 1280x720@20, yuyv — только 640x480@10",
     )
+    s.add_argument(
+        "--set-ctrl",
+        action="append",
+        metavar="NAME=VALUE",
+        help="Контролы камеры, например --set-ctrl gain=1,saturation=256",
+    )
     s.set_defaults(func=cmd_exposure)
+
+    s = sub.add_parser(
+        "analyze",
+        help="Найти диоды на снимке и подобрать точки замера вне пересвета",
+    )
+    s.add_argument(
+        "--image",
+        help="Разобрать готовый снимок (например docs/dim2_raw.png) вместо съёмки",
+    )
+    _add_camera_args(s)
+    s.add_argument("--out", default="analyze_result.png", help="Куда сохранить разметку")
+    s.add_argument(
+        "--window-size", type=int, default=5, help="Размер ROI для замера, px"
+    )
+    s.set_defaults(func=cmd_analyze)
+
+    s = sub.add_parser(
+        "find",
+        help="Как analyze, но кратко: только координаты новых точек замера",
+    )
+    s.add_argument("--image")
+    _add_camera_args(s)
+    s.add_argument("--out", default="")
+    s.add_argument("--window-size", type=int, default=5)
+    s.set_defaults(func=cmd_find)
 
     s = sub.add_parser("monitor", help="Таблица в реальном времени + лог изменений")
     _add_common_args(s, log_default=None)

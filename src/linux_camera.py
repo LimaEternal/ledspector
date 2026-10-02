@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -149,6 +150,66 @@ def resolve_auto_exposure_values(ctrls_text: str) -> Dict[str, Optional[int]]:
                 result["auto"] = current
 
     return result
+
+
+def parse_controls(ctrls_text: str) -> Dict[str, Dict[str, int]]:
+    """Разбирает вывод `v4l2-ctl --list-ctrls` в словарь контролов.
+
+    Возвращает {имя: {'value': N, 'min': N, 'max': N, 'default': N}}.
+    Имена приводятся к нижнему регистру: в выводе они набраны как есть, а
+    в разных камерах регистр отличается.
+    """
+    controls: Dict[str, Dict[str, int]] = {}
+
+    for raw_line in (ctrls_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("ioctl") or "0x" not in line:
+            continue
+
+        name = line.split()[0].strip().lower()
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
+            continue
+
+        entry: Dict[str, int] = {}
+        for key in ("value", "min", "max", "default"):
+            found = re.search(rf"\b{key}=(-?\d+)", line)
+            if found:
+                entry[key] = int(found.group(1))
+
+        if entry:
+            controls[name] = entry
+
+    return controls
+
+
+def detect_degraded_controls(
+    controls: Dict[str, Dict[str, int]]
+) -> List[Tuple[str, int, int]]:
+    """Ищет контролы, сброшенные в ноль при ненулевом default.
+
+    Драйверы UVC при инициализации нередко обнуляют `saturation` и
+    `contrast`. Насыщенность при этом падает настолько, что цветные диоды
+    приходят бесцветными и детектор объявляет их WHITE — при этом
+    экспозиция не помогает, потому что цвет потерян не по яркости.
+    Такие контролы стоит чинить до начала разметки.
+
+    Возвращает список (имя, значение, default) для подозрительных контролов.
+    """
+    suspect: List[Tuple[str, int, int]] = []
+
+    for name in ("saturation", "contrast"):
+        entry = controls.get(name)
+        if not entry:
+            continue
+        value = entry.get("value")
+        default = entry.get("default")
+        if value is None:
+            continue
+        # Ненулевой default при value=0 — признак сброса драйвером.
+        if value == 0 and (default is None or default > 0):
+            suspect.append((name, value, default if default is not None else -1))
+
+    return suspect
 
 
 class ExposureResult:
@@ -334,6 +395,57 @@ class LinuxCamera:
             )
             parts.append(f"{name}: {sizes}")
         return " | ".join(parts)
+
+    def get_controls(self) -> Dict[str, Dict[str, int]]:
+        """Возвращает текущие значения всех контролов камеры."""
+        return parse_controls(self.list_controls())
+
+    def apply_controls(self, settings: Dict[str, int]) -> Dict[str, int]:
+        """Выставляет контролы камеры и возвращает фактические значения.
+
+        Значения применяются одним вызовом `v4l2-ctl --set-ctrl`, потому
+        что драйверы UVC применяют набор контролов согласованно, а не по
+        одному. Каждое значение читается обратно: камера может округлить
+        запрос или проигнорировать его.
+        """
+        if not settings:
+            return {}
+
+        args = ["--set-ctrl=" + ",".join(f"{k}={v}" for k, v in settings.items())]
+        proc = self._run_v4l2(args)
+        if proc is None or proc.returncode != 0:
+            detail = (proc.stderr or "").strip() if proc is not None else "нет v4l2-ctl"
+            print(f"[camera] Не удалось выставить контролы: {detail}", file=sys.stderr)
+            return {}
+
+        actual = {
+            name: entry.get("value")
+            for name, entry in parse_controls(self.list_controls()).items()
+            if name in settings
+        }
+
+        for name, requested in settings.items():
+            got = actual.get(name)
+            if got is None:
+                continue
+            mark = "" if got == requested else "  <- камера скорректировала"
+            print(f"[camera] {name}={got} (запрошено {requested}){mark}")
+
+        return {k: v for k, v in actual.items() if v is not None}
+
+    def warn_degraded_controls(self) -> List[Tuple[str, int, int]]:
+        """Предупреждает о контролах, сброшенных драйвером в ноль."""
+        controls = self.get_controls()
+        suspect = detect_degraded_controls(controls)
+        for name, value, default in suspect:
+            shown = default if default >= 0 else "?"
+            print(
+                f"[camera] ВНИМАНИЕ: {name}={value}, а default={shown}. "
+                f"Драйвер сбросил контрол: цвета придут бесцветными и "
+                f"диоды будут читаться как WHITE. "
+                f"Починить: --set-ctrl {name}={shown}"
+            )
+        return suspect
 
     def supports(self, width: int, height: int, fourcc: str = DEFAULT_FOURCC) -> bool:
         """Проверяет по списку форматов, умеет ли камера нужный режим."""

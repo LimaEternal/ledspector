@@ -50,6 +50,7 @@ STATE_COLORS: Dict[str, str] = {
     "UNKNOWN": "\033[91m",
     "CALCULATING": "\033[94m",
     "NO_DATA": "\033[90m",
+    "BLOWN_OUT": "\033[95m",
 }
 
 COLOR_RESET = "\033[0m"
@@ -67,6 +68,8 @@ class LedReading:
     color: str
     brightness: float
     is_on: bool
+    blown: bool = False
+    clipped_fraction: float = 0.0
 
     @property
     def settled(self) -> bool:
@@ -139,6 +142,7 @@ class Monitor:
         self._events: List[Event] = []
         self._max_events_shown = 8
         self._last_frame: Optional[np.ndarray] = None
+        self._last_readings: Dict[str, LedReading] = {}
         self._snapshot_requested: Optional[str] = None
         self._snapshot_with_grid: bool = True
 
@@ -216,6 +220,13 @@ class Monitor:
                 brightness = float(result["brightness"])
                 color_name = str(result["color"])
                 is_on = bool(result["is_on"])
+                blown = bool(result["blown_out"])
+                clipped = float(result["clipped_fraction"])
+                # Пересвет — не состояние светодиода, а дефект замера:
+                # яркость зажата в 255, поэтому анализатор частоты здесь
+                # бессмыслен (он бы сообщил SOLID_ON намертво).
+                if blown:
+                    color_name = "BLOWN_OUT"
             else:
                 # Режим подбора экспозиции: важна только яркость, цвет
                 # в этот момент ещё не откалиброван и мешает.
@@ -223,20 +234,28 @@ class Monitor:
                 brightness = hsv_mean
                 color_name = "N/A"
                 is_on = brightness > 40.0
+                blown = False
+                clipped = 0.0
 
             self.analyser.update(led.id, brightness, now)
             state = self.analyser.analyze_state(led.id)
+            state_name = str(state["state"])
+            if blown:
+                state_name = "BLOWN_OUT"
 
             readings[led.id] = LedReading(
                 id=led.id,
-                state=str(state["state"]),
-                frequency_hz=float(state["frequency_hz"]),
+                state=state_name,
+                frequency_hz=0.0 if blown else float(state["frequency_hz"]),
                 color=color_name,
                 brightness=brightness,
                 is_on=is_on,
+                blown=blown,
+                clipped_fraction=clipped,
             )
 
         self._detect_changes(readings)
+        self._last_readings = readings
         self._maybe_save_snapshot()
         return readings
 
@@ -298,17 +317,22 @@ class Monitor:
 
         rows = [
             f"{'ID':<10}{'X':>5}{'Y':>5}{'W':>4}{'H':>4}  "
-            f"{'STATE':<13}{'Hz':>6}  {'COLOR':<8}{'BRIGHT':>7}"
+            f"{'STATE':<13}{'Hz':>6}  {'COLOR':<10}{'BRIGHT':>7}{'OVF':>5}"
         ]
-        rows.append("-" * 72)
+        rows.append("-" * 78)
 
         for led in self.config.leds:
             reading = readings.get(led.id)
             if reading is None:
                 continue
-            freq = f"{reading.frequency_hz:.2f}" if reading.frequency_hz > 0 else "-"
-            # Сначала выравнивание по видимому тексту, потом ANSI-обёртка —
-            # иначе коды цвета ломают ширину колонки.
+            freq = (
+                f"{reading.frequency_hz:.2f}"
+                if reading.frequency_hz > 0
+                else "-"
+            )
+            # OVF — доля срезанных каналов. Ненулевое значение означает,
+            # что точка замера попала в пересвет и цвет недостоверен.
+            ovf = f"{100 * reading.clipped_fraction:.0f}%"
             state_text = f"{reading.state:<13}"
             if tty:
                 color = STATE_COLORS.get(reading.state, "\033[97m")
@@ -316,7 +340,7 @@ class Monitor:
             rows.append(
                 f"{led.id:<10}{led.x:>5}{led.y:>5}{led.w:>4}{led.h:>4}  "
                 f"{state_text}"
-                f"{freq:>6}  {reading.color:<8}{reading.brightness:>7.1f}"
+                f"{freq:>6}  {reading.color:<10}{reading.brightness:>7.1f}{ovf:>5}"
             )
 
         rows.append("")
@@ -324,10 +348,13 @@ class Monitor:
         return [header, ""] + rows
 
     def _format_summary(self) -> str:
+        blown = sum(
+            1 for r in self._last_readings.values() if r is not None and r.blown
+        )
         return (
             f"кадров {self.frames} | потеряно {self.dropped} | "
             f"FPS {self.fps:.1f} | время {self.uptime():.0f}с | "
-            f"смен {len(self._events)}"
+            f"смен {len(self._events)} | пересвечено {blown}"
         )
 
     def _exposure_text(self) -> str:
